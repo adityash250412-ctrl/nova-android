@@ -19,51 +19,77 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-            - name: Set up Android SDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: "platforms;android-35,build-tools;35.0.0"
-      - name: Extract Android project
+          packages: "platform-tools"
+
+      - name: Install required Android SDK packages
+        run: |
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Extract project ZIP
         shell: bash
         run: |
-          set -e
-          mkdir -p /tmp/nova-unpack
-          ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -name "*.zip" | head -n 1)
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/nova"
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -name "*.zip" -print -quit)
           if [ -z "$ZIP_FILE" ]; then
-            echo "No ZIP file found in repository root."
+            echo "::error::No ZIP file found in repository root."
             exit 1
           fi
-          unzip -q "$ZIP_FILE" -d /tmp/nova-unpack
-          PROJECT_DIR=$(find /tmp/nova-unpack -type f -name gradlew -print -quit | xargs -r dirname)
+          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/nova"
+
+          PROJECT_DIR=$(find "$RUNNER_TEMP/nova" -type f -name gradlew -print -quit | xargs -r dirname)
+
           if [ -z "$PROJECT_DIR" ]; then
-            NESTED_ZIP=$(find /tmp/nova-unpack -type f -name "*.zip" -print -quit)
-            if [ -n "$NESTED_ZIP" ]; then
-              mkdir -p /tmp/nova-project
-              unzip -q "$NESTED_ZIP" -d /tmp/nova-project
-              PROJECT_DIR=$(find /tmp/nova-project -type f -name gradlew -print -quit | xargs -r dirname)
+            INNER_ZIP=$(find "$RUNNER_TEMP/nova" -type f -name "*.zip" -print -quit)
+            if [ -n "$INNER_ZIP" ]; then
+              mkdir -p "$RUNNER_TEMP/nova-inner"
+              unzip -q "$INNER_ZIP" -d "$RUNNER_TEMP/nova-inner"
+              PROJECT_DIR=$(find "$RUNNER_TEMP/nova-inner" -type f -name gradlew -print -quit | xargs -r dirname)
             fi
           fi
+
           if [ -z "$PROJECT_DIR" ]; then
-            echo "Could not find Gradle wrapper (gradlew) inside ZIP."
+            echo "::error::Could not find gradlew in the ZIP files."
+            find "$RUNNER_TEMP/nova" -maxdepth 3 -type f | head -80
             exit 1
           fi
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Android project found at: $PROJECT_DIR"
 
       - name: Build debug APK
+        shell: bash
         run: |
-          chmod +x "$PROJECT_DIR/gradlew"
+          set -euo pipefail
           cd "$PROJECT_DIR"
-          ./gradlew assembleDebug
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
 
-      - name: Upload APK
+      - name: Find APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find "$PROJECT_DIR" -type f -path "*/build/outputs/apk/*/*.apk" -print -quit)
+          if [ -z "$APK" ]; then
+            echo "::error::Build finished but no APK was found."
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
+          cp "$APK" "$GITHUB_WORKSPACE/apk-output/NOVA-debug.apk"
+          echo "APK copied successfully."
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: NOVA-debug-APK
-          path: /tmp/nova-unpack/**/app/build/outputs/apk/debug/app-debug.apk
+          path: apk-output/NOVA-debug.apk
           if-no-files-found: error
