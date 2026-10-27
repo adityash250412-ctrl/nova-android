@@ -1,101 +1,71 @@
-name: Build NOVA APK from ZIP
+
+name: Build NOVA APK
 
 on:
-workflow_dispatch:
+  workflow_dispatch:
+  push:
+    paths:
+      - "*.zip"
+      - ".github/workflows/build-apk.yml"
 
 permissions:
-contents: read
+  contents: read
 
 jobs:
-build:
-name: Build NOVA Android APK
-runs-on: ubuntu-latest
-timeout-minutes: 30
+  build:
+    runs-on: ubuntu-latest
 
-steps:
-  - name: Checkout repository
-    uses: actions/checkout@v4
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-  - name: Set up Java 17
-    uses: actions/setup-java@v4
-    with:
-      distribution: temurin
-      java-version: '17'
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
-  - name: Install unzip
-    run: sudo apt-get update && sudo apt-get install -y unzip
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
 
-  - name: Find and extract NOVA project ZIP
-    shell: bash
-    run: |
-      set -euo pipefail
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
-      ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*nova*project*ready*.zip' -print -quit)"
+      - name: Extract Android project
+        shell: bash
+        run: |
+          set -e
+          mkdir -p /tmp/nova-unpack
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -name "*.zip" | head -n 1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "No ZIP file found in repository root."
+            exit 1
+          fi
+          unzip -q "$ZIP_FILE" -d /tmp/nova-unpack
+          PROJECT_DIR=$(find /tmp/nova-unpack -type f -name gradlew -print -quit | xargs -r dirname)
+          if [ -z "$PROJECT_DIR" ]; then
+            NESTED_ZIP=$(find /tmp/nova-unpack -type f -name "*.zip" -print -quit)
+            if [ -n "$NESTED_ZIP" ]; then
+              mkdir -p /tmp/nova-project
+              unzip -q "$NESTED_ZIP" -d /tmp/nova-project
+              PROJECT_DIR=$(find /tmp/nova-project -type f -name gradlew -print -quit | xargs -r dirname)
+            fi
+          fi
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "Could not find Gradle wrapper (gradlew) inside ZIP."
+            exit 1
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      if [ -z "$ZIP_FILE" ]; then
-        echo "ERROR: NOVA project ZIP not found in repository root."
-        echo "Upload nova-android-project-ready.zip to the repository root."
-        exit 1
-      fi
+      - name: Build debug APK
+        run: |
+          chmod +x "$PROJECT_DIR/gradlew"
+          cd "$PROJECT_DIR"
+          ./gradlew assembleDebug
 
-      echo "Found project ZIP: $ZIP_FILE"
-      mkdir -p extracted
-      unzip -q "$ZIP_FILE" -d extracted
-
-      WRAPPER="$(find extracted -type f -name gradlew -print -quit)"
-
-      if [ -z "$WRAPPER" ]; then
-        echo "ERROR: gradlew was not found inside the ZIP."
-        exit 1
-      fi
-
-      PROJECT_DIR="$(dirname "$WRAPPER")"
-      echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-      echo "Project directory: $PROJECT_DIR"
-
-  - name: Set up Android SDK
-    uses: android-actions/setup-android@v3
-
-  - name: Install Android SDK packages
-    run: |
-      sdkmanager "platforms;android-35" "build-tools;35.0.0"
-      yes | sdkmanager --licenses || true
-
-  - name: Verify project configuration
-    shell: bash
-    run: |
-      set -euo pipefail
-      test -f "$PROJECT_DIR/settings.gradle.kts" || test -f "$PROJECT_DIR/settings.gradle"
-      test -f "$PROJECT_DIR/app/build.gradle.kts" || test -f "$PROJECT_DIR/app/build.gradle"
-      test -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.jar"
-      echo "Required Gradle project files found."
-
-  - name: Build debug APK
-    shell: bash
-    run: |
-      set -euo pipefail
-      cd "$PROJECT_DIR"
-      chmod +x gradlew
-      ./gradlew assembleDebug --stacktrace --no-daemon
-
-  - name: Verify APK exists
-    shell: bash
-    run: |
-      set -euo pipefail
-      APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-
-      if [ ! -f "$APK" ]; then
-        echo "ERROR: APK was not generated."
-        exit 1
-      fi
-
-      ls -lh "$APK"
-      echo "APK build output verified."
-
-  - name: Upload APK artifact
-    uses: actions/upload-artifact@v4
-    with:
-      name: nova-assistant-debug-apk
-      path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
-      if-no-files-found: error
-      retention-days: 14
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOVA-debug-APK
+          path: /tmp/nova-unpack/**/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
