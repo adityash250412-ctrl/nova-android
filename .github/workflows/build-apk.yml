@@ -29,7 +29,6 @@ uses: actions/checkout@v4
       ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*nova*project*ready*.zip' -print -quit)"
       if [ -z "$ZIP_FILE" ]; then
         echo "Project ZIP not found in repository root."
-        echo "Upload nova-android-project-ready.zip first."
         exit 1
       fi
       mkdir extracted
@@ -37,7 +36,6 @@ uses: actions/checkout@v4
       WRAPPER="$(find extracted -type f -name gradlew -print -quit)"
       if [ -z "$WRAPPER" ]; then
         echo "gradlew not found inside ZIP."
-        find extracted -maxdepth 3 -type f | head -100
         exit 1
       fi
       echo "PROJECT_DIR=$(dirname "$WRAPPER")" >> "$GITHUB_ENV"
