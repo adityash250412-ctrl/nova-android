@@ -29,13 +29,16 @@ jobs:
         uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: "latest"
-          packages: |
-            platform-tools
-            platforms;android-35
-            build-tools;35.0.0
 
-      - name: Accept Android SDK Licenses
-        run: yes | sdkmanager --licenses || true
+      - name: Install Android SDK Packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Locate Android Project
         id: project
@@ -56,40 +59,38 @@ jobs:
           )
 
           if [[ ${#archives[@]} -ne 1 ]]; then
-            echo "::error::Expected exactly one project ZIP at repository root; found ${#archives[@]}."
+            echo "::error::Expected exactly one ZIP at repository root."
             printf '%s\n' "${archives[@]}"
             exit 1
           fi
 
-          OUTER="${archives[0]}"
-          echo "Inspecting: $OUTER"
-          unzip -oq "$OUTER" -d "$RUNNER_TEMP/nova-hub"
+          unzip -oq "${archives[0]}" -d "$RUNNER_TEMP/nova-hub"
 
           INNER="$RUNNER_TEMP/nova-hub/public/downloads/nova-android-project-ready.zip"
 
           if [[ ! -f "$INNER" ]]; then
-            echo "::error::Android project ZIP not found at public/downloads/nova-android-project-ready.zip"
+            echo "::error::Expected Android project ZIP was not found."
             find "$RUNNER_TEMP/nova-hub" -type f -name '*.zip' -print
             exit 1
           fi
 
           unzip -oq "$INNER" -d "$RUNNER_TEMP/nova-project"
 
-          ROOT="$RUNNER_TEMP/nova-project"
-          SETTINGS="$(find "$ROOT" -maxdepth 4 -type f \
+          SETTINGS="$(find "$RUNNER_TEMP/nova-project" \
+            -maxdepth 5 -type f \
             \( -name settings.gradle -o -name settings.gradle.kts \) \
             -print -quit)"
 
           if [[ -z "$SETTINGS" ]]; then
-            echo "::error::Android ZIP has no Gradle settings file."
-            find "$ROOT" -maxdepth 4 -type f | head -100
+            echo "::error::No Gradle settings file in Android ZIP."
+            find "$RUNNER_TEMP/nova-project" -maxdepth 5 -type f | head -100
             exit 1
           fi
 
           ROOT="$(dirname "$SETTINGS")"
 
           if [[ ! -f "$ROOT/gradlew" ]]; then
-            echo "::error::Gradle wrapper gradlew is missing."
+            echo "::error::Gradle wrapper is missing."
             exit 1
           fi
 
@@ -115,12 +116,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ROOT="${{ steps.project.outputs.root }}"
-          APK="$ROOT/app/build/outputs/apk/debug/app-debug.apk"
+          APK="${{ steps.project.outputs.root }}/app/build/outputs/apk/debug/app-debug.apk"
 
           if [[ ! -s "$APK" ]]; then
             echo "::error::APK was not created."
-            find "$ROOT/app/build/outputs" -type f 2>/dev/null || true
             exit 1
           fi
 
