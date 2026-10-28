@@ -2,9 +2,9 @@ name: Build Android Debug APK
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
   workflow_dispatch:
 
 jobs:
@@ -20,7 +20,7 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: "temurin"
+          distribution: temurin
           java-version: "17"
 
       - name: Set up Android SDK
@@ -29,168 +29,143 @@ jobs:
           packages: "platforms;android-35 build-tools;35.0.0"
 
       - name: Accept Android SDK Licenses
-        run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
 
       - name: Locate or Extract Android Project
         id: project_setup
+        shell: bash
         run: |
           set -euo pipefail
-
-          echo "=== Inspecting workspace structure ==="
+          echo "=== Repository root ==="
           ls -la
+          PROJECT_ROOT=""
 
-          PROJECT_DIR="."
-
-          if [ ! -f "settings.gradle.kts" ] && [ ! -f "settings.gradle" ]; then
-            echo "No settings.gradle(.kts) found in repository root. Searching for project ZIP archives..."
-
-            ZIP_FILES=$(find . -maxdepth 3 -type f -name "*.zip" ! -path "*/.*")
-            if [ -z "$ZIP_FILES" ]; then
-              echo "::error::Neither settings.gradle(.kts) nor any project .zip file was found in the repository root!"
+          # Prefer a real project already checked into the repository.
+          if [[ -f settings.gradle.kts || -f settings.gradle ]]; then
+            PROJECT_ROOT="."
+          else
+            mkdir -p extracted_project
+            # Handle spaces, parentheses, ampersands, and other special characters safely.
+            mapfile -d '' ZIP_FILES < <(find . -maxdepth 2 -type f -name '*.zip' ! -path './.git/*' -print0)
+            if (( ${#ZIP_FILES[@]} == 0 )); then
+              echo "::error::No Gradle project or ZIP archive found in repository."
               exit 1
             fi
 
-            echo "Found ZIP file(s):"
-            echo "$ZIP_FILES"
-
+            echo "Found ${#ZIP_FILES[@]} archive(s). Searching archive contents safely..."
             SELECTED_ZIP=""
-            for z in $ZIP_FILES; do
-              if unzip -l "$z" | grep -qE "settings\.gradle(\.kts)?"; then
+            for z in "${ZIP_FILES[@]}"; do
+              echo "Checking archive: $z"
+              if unzip -Z1 "$z" 2>/dev/null | grep -Eq '(^|/)settings\.gradle(\.kts)?$'; then
                 SELECTED_ZIP="$z"
-                echo "Selected project archive: $SELECTED_ZIP"
+                echo "Selected archive containing Gradle settings: $SELECTED_ZIP"
                 break
               fi
             done
 
-            if [ -z "$SELECTED_ZIP" ]; then
-              SELECTED_ZIP=$(echo "$ZIP_FILES" | head -n 1)
-              echo "Fallback to first archive: $SELECTED_ZIP"
-            fi
-
-            mkdir -p extracted_project
-            unzip -q -o "$SELECTED_ZIP" -d extracted_project
-            PROJECT_DIR="extracted_project"
-
-            NESTED_ZIPS=$(find extracted_project -maxdepth 2 -type f -name "*.zip" || true)
-            if [ -n "$NESTED_ZIPS" ]; then
-              for nz in $NESTED_ZIPS; do
-                if unzip -l "$nz" | grep -qE "settings\.gradle(\.kts)?"; then
-                  echo "Found nested project archive: $nz"
-                  mkdir -p extracted_nested
-                  unzip -q -o "$nz" -d extracted_nested
-                  PROJECT_DIR="extracted_nested"
+            # If the uploaded ZIP is a builder hub containing a project ZIP inside it,
+            # extract the hub and inspect its nested ZIPs too.
+            if [[ -n "$SELECTED_ZIP" ]]; then
+              unzip -q "$SELECTED_ZIP" -d extracted_project
+            else
+              SELECTED_ZIP="${ZIP_FILES[0]}"
+              echo "No direct Gradle settings in outer archives; extracting hub: $SELECTED_ZIP"
+              unzip -q "$SELECTED_ZIP" -d extracted_project
+              while IFS= read -r -d '' nested; do
+                echo "Checking nested archive: $nested"
+                if unzip -Z1 "$nested" 2>/dev/null | grep -Eq '(^|/)settings\.gradle(\.kts)?$'; then
+                  mkdir -p extracted_android_project
+                  unzip -q "$nested" -d extracted_android_project
+                  PROJECT_ROOT="extracted_android_project"
                   break
                 fi
-              done
+              done < <(find extracted_project -type f -name '*.zip' -print0)
             fi
-          fi
 
-          ACTUAL_DIR=$(find "$PROJECT_DIR" -maxdepth 5 \( -name "settings.gradle.kts" -o -name "settings.gradle" \) ! -path "*/build/*" | head -n 1)
-          if [ -z "$ACTUAL_DIR" ]; then
-            echo "::error::Could not find settings.gradle or settings.gradle.kts in $PROJECT_DIR!"
-            exit 1
-          fi
-
-          PROJECT_ROOT=$(dirname "$ACTUAL_DIR")
-          echo "project_root=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
-          echo "=== Resolved Android Project Root: $PROJECT_ROOT ==="
-
-      - name: Verify and Setup Gradle Wrapper
-        run: |
-          set -euo pipefail
-          PROJECT_ROOT="${{ steps.project_setup.outputs.project_root }}"
-          cd "$PROJECT_ROOT"
-
-          echo "=== Verifying Gradle Wrapper in $PROJECT_ROOT ==="
-          mkdir -p gradle/wrapper
-
-          WRAPPER_JAR="gradle/wrapper/gradle-wrapper.jar"
-          WRAPPER_PROPS="gradle/wrapper/gradle-wrapper.properties"
-
-          if [ ! -f "$WRAPPER_JAR" ] || [ ! -s "$WRAPPER_JAR" ]; then
-            GRADLE_VER="8.10.2"
-            if [ -f "$WRAPPER_PROPS" ]; then
-              DETECTED_VER=$(grep "distributionUrl" "$WRAPPER_PROPS" | grep -oE "gradle-[0-9]+\.[0-9]+(\.[0-9]+)?" | sed 's/gradle-//' || true)
-              if [ -n "$DETECTED_VER" ]; then
-                GRADLE_VER="$DETECTED_VER"
+            # If a direct archive was selected, find the actual project folder inside it.
+            if [[ -z "$PROJECT_ROOT" ]]; then
+              SETTINGS_FILE=$(find extracted_project -type f \( -name settings.gradle.kts -o -name settings.gradle \) -not -path '*/.git/*' -print -quit)
+              if [[ -n "$SETTINGS_FILE" ]]; then
+                PROJECT_ROOT="$(dirname "$SETTINGS_FILE")"
               fi
             fi
-            echo "Downloading official gradle-wrapper.jar for Gradle $GRADLE_VER..."
-            curl -sSL "https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VER}/gradle/wrapper/gradle-wrapper.jar" -o "$WRAPPER_JAR" || \
-            curl -sSL "https://services.gradle.org/distributions/gradle-${GRADLE_VER}-bin.zip" -o /tmp/gradle-dist.zip && \
-            unzip -q -j /tmp/gradle-dist.zip "*/lib/plugins/gradle-wrapper-*.jar" -d /tmp/wrapper_tmp && \
-            mv /tmp/wrapper_tmp/gradle-wrapper-*.jar "$WRAPPER_JAR" || true
           fi
 
-          if [ ! -f "gradlew" ]; then
-            echo "::error::gradlew script not found in $PROJECT_ROOT!"
+          if [[ -z "$PROJECT_ROOT" ]] || [[ ! -f "$PROJECT_ROOT/settings.gradle.kts" && ! -f "$PROJECT_ROOT/settings.gradle" ]]; then
+            echo "::error::Could not find settings.gradle(.kts) in the uploaded archive or its nested project ZIPs."
+            echo "Extracted files for diagnosis:"
+            find extracted_project -maxdepth 4 -type f | head -100 || true
             exit 1
           fi
 
+          echo "project_root=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
+          echo "Resolved Android project root: $PROJECT_ROOT"
+          ls -la "$PROJECT_ROOT"
+
+      - name: Verify and Fix Gradle Wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_ROOT="${{ steps.project_setup.outputs.project_root }}"
+          cd "$PROJECT_ROOT"
+          mkdir -p gradle/wrapper
+          WRAPPER_JAR="gradle/wrapper/gradle-wrapper.jar"
+          EXPECTED_SHA256="2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+          NEED_DOWNLOAD=false
+          if [[ ! -s "$WRAPPER_JAR" ]]; then
+            NEED_DOWNLOAD=true
+          else
+            CURRENT_SHA256=$(sha256sum "$WRAPPER_JAR" | awk '{print $1}')
+            [[ "$CURRENT_SHA256" == "$EXPECTED_SHA256" ]] || NEED_DOWNLOAD=true
+          fi
+          if [[ "$NEED_DOWNLOAD" == true ]]; then
+            curl -fsSL "https://raw.githubusercontent.com/gradle/gradle/v8.10.2/gradle/wrapper/gradle-wrapper.jar" -o "$WRAPPER_JAR"
+            ACTUAL_SHA256=$(sha256sum "$WRAPPER_JAR" | awk '{print $1}')
+            if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+              echo "::error::Gradle wrapper JAR checksum verification failed."
+              exit 1
+            fi
+          fi
+          [[ -f gradlew ]] || { echo "::error::gradlew missing in $PROJECT_ROOT"; exit 1; }
           chmod +x gradlew
-          echo "Gradle wrapper ready."
 
       - name: Validate Project Configuration
+        shell: bash
         run: |
           set -euo pipefail
           PROJECT_ROOT="${{ steps.project_setup.outputs.project_root }}"
           cd "$PROJECT_ROOT"
+          [[ -f app/build.gradle.kts || -f app/build.gradle ]] || { echo "::error::app/build.gradle(.kts) missing"; exit 1; }
+          [[ -f app/src/main/AndroidManifest.xml ]] || { echo "::error::AndroidManifest.xml missing"; exit 1; }
+          echo "Android project structure verified."
 
-          echo "=== Validating Required Project Files ==="
-          if [ ! -f "settings.gradle.kts" ] && [ ! -f "settings.gradle" ]; then
-            echo "::error::Missing settings.gradle or settings.gradle.kts!"
-            exit 1
-          fi
-
-          if [ ! -f "app/build.gradle.kts" ] && [ ! -f "app/build.gradle" ]; then
-            echo "::error::Missing app/build.gradle or app/build.gradle.kts!"
-            exit 1
-          fi
-
-          if [ ! -f "app/src/main/AndroidManifest.xml" ]; then
-            echo "::error::Missing app/src/main/AndroidManifest.xml!"
-            exit 1
-          fi
-
-          echo "Core project structure verified."
-
-      - name: Run Android Unit Tests
+      - name: Run Unit Tests
+        shell: bash
         run: |
           set -euo pipefail
-          PROJECT_ROOT="${{ steps.project_setup.outputs.project_root }}"
-          cd "$PROJECT_ROOT"
-
-          echo "=== Running Android Unit Tests ==="
+          cd "${{ steps.project_setup.outputs.project_root }}"
           ./gradlew test --stacktrace --no-daemon
 
       - name: Build Debug APK
+        shell: bash
         run: |
           set -euo pipefail
-          PROJECT_ROOT="${{ steps.project_setup.outputs.project_root }}"
-          cd "$PROJECT_ROOT"
-
-          echo "=== Starting Gradle Debug Build ==="
+          cd "${{ steps.project_setup.outputs.project_root }}"
           ./gradlew assembleDebug --stacktrace --no-daemon
 
-      - name: Verify APK Output & Calculate Checksum
+      - name: Verify APK Output
         id: verify_apk
+        shell: bash
         run: |
           set -euo pipefail
           PROJECT_ROOT="${{ steps.project_setup.outputs.project_root }}"
-
-          APK_PATH=$(find "$PROJECT_ROOT/app/build/outputs/apk/debug" -maxdepth 2 -type f -name "*.apk" | head -n 1)
-
-          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
-            echo "::error::Expected APK was not found under $PROJECT_ROOT/app/build/outputs/apk/debug!"
-            echo "Contents of app/build/outputs:"
-            find "$PROJECT_ROOT/app/build/outputs" || true
+          APK_PATH="$PROJECT_ROOT/app/build/outputs/apk/debug/app-debug.apk"
+          if [[ ! -s "$APK_PATH" ]]; then
+            echo "::error::Non-empty app-debug.apk not found at expected path."
+            find "$PROJECT_ROOT/app/build/outputs" -type f 2>/dev/null || true
             exit 1
           fi
-
-          echo "SUCCESS: Debug APK found!"
           ls -lh "$APK_PATH"
-          echo "SHA-256 Checksum:"
           sha256sum "$APK_PATH"
           echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
 
