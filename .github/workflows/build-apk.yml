@@ -3,16 +3,17 @@ name: Build Android Debug APK
 
 on:
   push:
-    branches: ["main", "master"]
-  pull_request:
-    branches: ["main", "master"]
+    branches: [main, master]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     name: Build Android Debug APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - name: Checkout Repository
@@ -26,6 +27,12 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: "latest"
+          packages: |
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
 
       - name: Accept Android SDK Licenses
         run: yes | sdkmanager --licenses || true
@@ -36,46 +43,54 @@ jobs:
         run: |
           set -euo pipefail
 
-          ROOT=""
           if [[ -f settings.gradle.kts || -f settings.gradle ]]; then
-            ROOT="."
-          else
-            mkdir -p hub android_project
+            echo "root=." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-            mapfile -d '' zips < <(
-              find . -maxdepth 2 -type f -name '*.zip' \
-                ! -path './.git/*' -print0
-            )
+          mkdir -p "$RUNNER_TEMP/nova-hub" "$RUNNER_TEMP/nova-project"
 
-            if [[ ${#zips[@]} -eq 0 ]]; then
-              echo "::error::No ZIP found in repository."
-              exit 1
-            fi
+          mapfile -d '' archives < <(
+            find "$GITHUB_WORKSPACE" -maxdepth 1 \
+              -type f -name '*.zip' -print0
+          )
 
-            HUB="${zips[0]}"
-            echo "Outer ZIP: $HUB"
-            unzip -oq "$HUB" -d hub
+          if [[ ${#archives[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one project ZIP at repository root; found ${#archives[@]}."
+            printf '%s\n' "${archives[@]}"
+            exit 1
+          fi
 
-            INNER="hub/public/downloads/nova-android-project-ready.zip"
+          OUTER="${archives[0]}"
+          echo "Inspecting: $OUTER"
+          unzip -oq "$OUTER" -d "$RUNNER_TEMP/nova-hub"
 
-            if [[ ! -f "$INNER" ]]; then
-              echo "::error::Expected Android ZIP not found: $INNER"
-              find hub -type f -name '*.zip' -print
-              exit 1
-            fi
+          INNER="$RUNNER_TEMP/nova-hub/public/downloads/nova-android-project-ready.zip"
 
-            echo "Selected Android ZIP: $INNER"
-            unzip -oq "$INNER" -d android_project
+          if [[ ! -f "$INNER" ]]; then
+            echo "::error::Android project ZIP not found at public/downloads/nova-android-project-ready.zip"
+            find "$RUNNER_TEMP/nova-hub" -type f -name '*.zip' -print
+            exit 1
+          fi
 
-            if [[ -f android_project/settings.gradle.kts ]]; then
-              ROOT="android_project"
-            elif [[ -f android_project/settings.gradle ]]; then
-              ROOT="android_project"
-            else
-              echo "::error::Selected ZIP has no Gradle settings file."
-              find android_project -maxdepth 3 -type f | head -100
-              exit 1
-            fi
+          unzip -oq "$INNER" -d "$RUNNER_TEMP/nova-project"
+
+          ROOT="$RUNNER_TEMP/nova-project"
+          SETTINGS="$(find "$ROOT" -maxdepth 4 -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \) \
+            -print -quit)"
+
+          if [[ -z "$SETTINGS" ]]; then
+            echo "::error::Android ZIP has no Gradle settings file."
+            find "$ROOT" -maxdepth 4 -type f | head -100
+            exit 1
+          fi
+
+          ROOT="$(dirname "$SETTINGS")"
+
+          if [[ ! -f "$ROOT/gradlew" ]]; then
+            echo "::error::Gradle wrapper gradlew is missing."
+            exit 1
           fi
 
           if [[ ! -f "$ROOT/app/build.gradle.kts" && \
@@ -84,13 +99,8 @@ jobs:
             exit 1
           fi
 
-          if [[ ! -f "$ROOT/gradlew" ]]; then
-            echo "::error::gradlew is missing."
-            exit 1
-          fi
-
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
-          echo "Android project selected: $ROOT"
+          echo "Android project found: $ROOT"
 
       - name: Build Debug APK
         shell: bash
@@ -106,23 +116,23 @@ jobs:
         run: |
           set -euo pipefail
           ROOT="${{ steps.project.outputs.root }}"
-          FILE="$ROOT/app/build/outputs/apk/debug/app-debug.apk"
+          APK="$ROOT/app/build/outputs/apk/debug/app-debug.apk"
 
-          if [[ ! -s "$FILE" ]]; then
-            echo "::error::APK missing or empty."
-            find "$ROOT/app/build/outputs" -type f || true
+          if [[ ! -s "$APK" ]]; then
+            echo "::error::APK was not created."
+            find "$ROOT/app/build/outputs" -type f 2>/dev/null || true
             exit 1
           fi
 
-          echo "file=$FILE" >> "$GITHUB_OUTPUT"
-          ls -lh "$FILE"
-          sha256sum "$FILE"
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          ls -lh "$APK"
+          sha256sum "$APK"
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: nova-assistant-debug-apk
-          path: ${{ steps.apk.outputs.file }}
+          path: ${{ steps.apk.outputs.path }}
           if-no-files-found: error
           retention-days: 14
           
